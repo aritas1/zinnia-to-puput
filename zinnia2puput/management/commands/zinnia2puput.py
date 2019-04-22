@@ -4,9 +4,10 @@ import lxml.html
 
 from django.core.management import BaseCommand
 from django.conf import settings
+# includes fixed for wagtail >= 2.0
 from django.core.files import File
-from wagtail.wagtailcore.models import Page, Site
-from wagtail.wagtailimages.models import Image as WagtailImage
+from wagtail.core.models import Page, Site
+from wagtail.images.models import Image as WagtailImage
 from zinnia.models import Category as ZinniaCategory, Entry as ZinniaEntry
 
 
@@ -80,18 +81,43 @@ class Command(BaseCommand):
                 root = lxml.html.fromstring(entry.content)
                 for el in root.iter('img'):
                     if el.attrib['src'].startswith(settings.MEDIA_URL):
-                        old_image = el.attrib['src'].replace(settings.MEDIA_URL, '')
-                        with open('{}/{}'.format(settings.MEDIA_ROOT, old_image), 'r') as image_file:
-                            new_image = WagtailImage(file=File(file=image_file, name=os.path.basename(old_image)),
-                                                     title=os.path.basename(old_image))
-                            new_image.save()
-                            el.attrib['src'] = new_image.file.url
-                            self.stdout.write('\t\t{}'.format(new_image.file.url))
+                        # fix media chunks path naming e.g. /media/chinks/media/stuff.jpg will fail
+                        img_path = el.attrib['src']
+                        old_image = img_path[len(settings.MEDIA_URL):]
+                        try:
+                            with open('{}/{}'.format(settings.MEDIA_ROOT, old_image), 'r') as image_file:
+                                new_image = WagtailImage(file=File(file=image_file, name=os.path.basename(old_image)),
+                                                         title=os.path.basename(old_image))
+                                new_image.save()
+                                el.attrib['src'] = new_image.file.url
+                                self.stdout.write('\t\t{}'.format(new_image.file.url))
+                        except Exception as e:
+                            # handle image encoding errors like none utf-8 cahrs
+                            print(e)
+                            print("error handling image, move on... entry:" + str(entry.id))
+
 
                 # New content with images replaced
                 content = lxml.html.tostring(root, pretty_print=True)
             else:
                 content = entry.content
+
+
+
+            # decode, somehow the content is a byte array
+            if len(content) != 0:
+                content = content.decode()
+
+            # First, convert the html to json, with the appropriate block type
+            # we convertet the blody from a RichTextField to a StreamField
+            import json
+            content = json.dumps([{'type': 'html', 'value': content}])
+
+            # fix empty author entrys (puput will not render the page if no author is set)
+            author = entry.authors.first()
+            if author == None:
+                from zinnia.models.author import Author
+                author = Author.objects.first()
 
             # Create page
             try:
@@ -100,12 +126,14 @@ class Command(BaseCommand):
                 page = EntryPage(
                     title=entry.title,
                     body=content,
+                    #fix missing excerpt transfer
+                    excerpt=entry.excerpt,
                     slug=entry.slug,
                     go_live_at=entry.start_publication,
                     expire_at=entry.end_publication,
                     first_published_at=entry.creation_date,
                     date=entry.creation_date,
-                    owner=entry.authors.first(),
+                    owner=author,
                     seo_title=entry.title,
                     search_description=entry.excerpt,
                     live=entry.is_visible,
